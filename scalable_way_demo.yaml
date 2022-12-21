@@ -1,0 +1,973 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Running Apache CloudStack on EC2 the Scalable Way: This template creates EC2 instances, security groups, an EFS file
+  system, an RDS database, and a transit gateway for multicast traffic.  In order to connect to the instances, you'll
+  need to add route table entries for the overlay subnet CIDR, using the router EC2 instance as the target.
+
+  **WARNING** This template creates Amazon EC2 instances, an RDS database, an EFS file system, and other resources.
+  You will be billed for the AWS resources used if you create a stack from this template.
+
+###############################################################################
+# Metadata
+###############################################################################
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: VPC
+        Parameters:
+          - VpcId
+          - CloudStackSubnet
+          - SecondSubnet
+          - DnsAddress
+          - MulticastIP
+          - AccessLocation
+      - Label:
+          default: EC2
+        Parameters:
+          - RouterInstanceType
+          - ManagementInstanceType
+          - HostInstanceType
+      - Label:
+          default: Storage
+        Parameters:
+          - EFSProvisionedThroughputInMibps
+      - Label:
+          default: Database
+        Parameters:
+          - DatabaseInstanceClass
+          - DatabaseAllocatedStorage
+          - DatabaseMaxStorage
+      - Label:
+          default: Overlay Network
+        Parameters:
+          - OverlaySubnetRouterIpAddress
+          - OverlaySubnetManagementIpAddress
+          - OverlaySubnetHostIpAddress
+          - OverlaySubnetMask
+      - Label:
+          default: CloudStack Settings
+        Parameters:
+          - CloudStackVersion
+          - CloudStackPublicTrafficCidr
+          - CloudStackPodCidr
+          - CloudStackSharedNetworkCidr
+          - SampleTemplateName
+          - SampleTemplateUrl
+
+###############################################################################
+# Parameters
+###############################################################################
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >-
+      VpcId of your existing Virtual Private Cloud (VPC).  DNS resolution and DNS hostnames must be enabled on the VPC.
+    ConstraintDescription: Must be the VPC Id of an existing Virtual Private Cloud.
+
+  CloudStackSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A private subnet in your Virtual Private Cloud (VPC) for the CloudStack EC2 instances.  Outbound Internet access
+      is required.
+    ConstraintDescription: Must be an existing subnet in the selected Virtual Private Cloud.
+
+  SecondSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A second private subnet in your Virtual Private Cloud (VPC) that's in a different AZ than CloudStackSubnet.  This is
+      required for creating an RDS databse.  (The database must have subnets in at least two AZs.)
+    ConstraintDescription: >-
+      Must be an existing subnet in the selected Virtual Private Cloud.  Must be in a different AZ than
+      CloudStackSubnet.
+
+  DnsAddress:
+    Description: >-
+      The IP address of an existing DNS server that should be used by CloudStack and its VMs.  (169.254.169.253 is not
+      allowed because CloudStack reserves link-local addresses for its own use.  Try the VPC base address plus two.)
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    AllowedPattern: '(?!169\.254\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    ConstraintDescription: Must be a valid IPv4 address the in form x.x.x.x.  Must not be in the 169.254.0.0/16 range.
+
+  MulticastIP:
+    Description: The multicast IP address that VXLAN will use
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    Default: 239.255.0.0
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    ConstraintDescription: Must be a valid IPv4 address in the form x.x.x.x.
+
+  AccessLocation:
+    Description: >-
+      The IP address range (in CIDR notation) that can be used to access the CloudStack EC2 instances and VMs.  If
+      you're not sure what to put here, try your VPC CIDR.  For security reasons, this demo requires a suffix of /16 or
+      greater.
+
+      After you update the appropriate route tables, two-way communication will be possible between machines in the
+      access location and those in the overlay network.  When adding routes, use the overlay network as the destination,
+      and the router instance as the target.  The router will use NAT when forwarding traffic from the overlay network
+      to addresses outside of the access location.
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/(1[6-9]|2[0-4])'
+    ConstraintDescription: >-
+      Must be a valid IP CIDR range in the form x.x.x.x/x.  For security reasons, this demo requires a suffix of /16 or
+      greater.
+
+  # The allowed values here aren't the only valid values.  The list was kept short for convenience.
+  RouterInstanceType:
+    Description: The EC2 instance type for the router.  Pick something that can handle your expected network load.
+    Type: String
+    Default: t4g.small
+    AllowedValues:
+      - t4g.small
+      - c6g.medium
+      - cg6n.large
+    ConstraintDescription: must be a valid Nitro instance type
+
+  # The allowed values here aren't the only valid values.  The list was kept short for convenience.
+  ManagementInstanceType:
+    Description: The EC2 instance type for the management server.  Pick something that can handle your expected load.
+    Type: String
+    Default: t3a.medium
+    AllowedValues:
+      - t3a.medium
+      - c6i.large
+      - c6i.xlarge
+      - c6i.2xlarge
+      - c6i.4xlarge
+    ConstraintDescription: must be a valid Nitro x86_64 instance type
+
+  HostInstanceType:
+    Description: >-
+      The EC2 instance type for the CloudStack host (hypervisor).  **WARNING** Research the costs for your region!
+      Metal instances can be very expensive.
+    Type: String
+    Default: c5.metal
+    AllowedValues:
+      - c5.metal
+      - c5d.metal
+      - c5n.metal
+      - c6i.metal
+      - c6id.metal
+      - g4dn.metal
+      - i3.metal
+      - i3en.metal
+      - i4i.metal
+      - m5.metal
+      - m5d.metal
+      - m5dn.metal
+      - m5n.metal
+      - m5zn.metal
+      - m6i.metal
+      - m6id.metal
+      - r5.metal
+      - r5b.metal
+      - r5d.metal
+      - r5dn.metal
+      - r5n.metal
+      - r6i.metal
+      - r6id.metal
+      - z1d.metal
+    ConstraintDescription: must be a valid bare metal x86_64 Nitro instance type.
+
+  EFSProvisionedThroughputInMibps:
+    Description: >-
+      Provisioned throughput for EFS in MiB/s.
+    Type: Number
+    Default: 25
+    MinValue: 1
+    MaxValue: 1000
+
+  OverlaySubnetRouterIpAddress:
+    Description: The IP address to be assigned to the CloudStack router in the overlay subnet
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    Default: 10.101.0.1
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    ConstraintDescription: Must be a valid IPv4 address in the form x.x.x.x.
+
+  OverlaySubnetManagementIpAddress:
+    Description: The IP address to be assigned to the CloudStack management server in the overlay subnet
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    Default: 10.101.0.2
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    ConstraintDescription: Must be a valid IPv4 address in the form x.x.x.x.
+
+  OverlaySubnetHostIpAddress:
+    Description: The IP address to be assigned to the CloudStack host in the overlay subnet
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    Default: 10.101.0.10
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    ConstraintDescription: Must be a valid IPv4 address in the form x.x.x.x.
+
+  OverlaySubnetMask:
+    Description: The overlay subnet's mask
+    Type: String
+    MinLength: 7
+    MaxLength: 15
+    Default: 255.255.0.0
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    ConstraintDescription: Must be a valid IPv4 subnet mask in the form x.x.x.x.
+
+  # The allowed values here aren't the only valid values.  The list was kept short for convenience.
+  DatabaseInstanceClass:
+    Description: Database instance class
+    Type: String
+    Default: db.m6g.large
+    AllowedValues:
+      - db.m6g.large
+      - db.m6g.xlarge
+      - db.m6g.2xlarge
+      - db.m6g.4xlarge
+      - db.m6g.8xlarge
+      - db.m6g.12xlarge
+      - db.m6g.16xlarge
+    ConstraintDescription: Must be a valid RDS instance class
+
+  DatabaseAllocatedStorage:
+    Description: Initially allocated database storage in GiB
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 65536
+
+  DatabaseMaxStorage:
+    Description: Max database storage in GiB.  Must be greater than DatabaseAllocatedStorage.
+    Type: Number
+    Default: 100
+    MinValue: 21
+    MaxValue: 65536
+    ConstraintDescription: Must be greater than DatabaseAllocatedStorage
+
+  CloudStackVersion:
+    Description: The version of CloudStack to install.  Must be >= 4.16.  Only 4.17 has been tested.
+    Type: String
+    Default: 4.17
+    AllowedPattern: '4\.(1[6-9]|[2-9][0-9])'
+    ConstraintDescription: Must be a 4.x version, and >= 4.16
+
+  CloudStackPublicTrafficCidr:
+    Description: The IP address range (in CIDR notation) in the overlay subnet for system VMs.
+    Type: String
+    Default: 10.101.1.0/24
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}'
+    ConstraintDescription: Must be a valid IP CIDR range in the form x.x.x.x/x.
+
+  CloudStackPodCidr:
+    Description: The IP address range (in CIDR notation) in the overlay subnet for the management network (control plane).
+    Type: String
+    Default: 10.101.2.0/24
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}'
+    ConstraintDescription: Must be a valid IP CIDR range in the form x.x.x.x/x.
+
+  CloudStackSharedNetworkCidr:
+    Description: The IP address range (in CIDR notation) in the overlay subnet for user-created VMs.
+    Type: String
+    Default: 10.101.128.0/24
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}'
+    ConstraintDescription: Must be a valid IP CIDR range in the form x.x.x.x/x.
+
+  SampleTemplateName:
+    Description: The name of a KVM template (in QCOW2 format) to register with CloudStack (optional)
+    Type: String
+
+  SampleTemplateUrl:
+    Description: The URL of a KVM template (in QCOW2 format) to register with CloudStack (optional)
+    Type: String
+    AllowedPattern: '(?i)(^$|https?://.+\.qcow2)'
+    ConstraintDescription: Must start with http:// or https://, and end with .qcow2
+
+###############################################################################
+# Mappings
+###############################################################################
+Mappings:
+  # TODO: Add file URLs below
+  FileSourceMap:
+    Common:
+      URL: 
+    InstallManagement:
+      URL: 
+    InstallAgent:
+      URL: 
+    SetupRouter:
+      URL: 
+    ConfigureDemo:
+      URL: 
+  ImageIdMap:
+    Router:
+      # Use ARM64 Amazon Linux 2 -- Using ARM64 to save a few cents. The router can be ARM64 or x86_64, AL2 or CentOS 7.
+      ImageId: 'resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-arm64-gp2'
+    NonRouter:
+      # Use x86_64 CentOS 7 from https://aws.amazon.com/marketplace/pp/B08KYKK42V
+      ImageId: 'resolve:ssm:/aws/service/marketplace/prod-a77hqdkwpdk3o/latest'
+
+###############################################################################
+# Resources
+###############################################################################
+Resources:
+  CloudStackVXLANSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Enable VXLAN access for the overlay network
+      SecurityGroupIngress:
+        - IpProtocol: 2
+          CidrIp: 0.0.0.0/32
+        - IpProtocol: udp
+          FromPort: 4789
+          ToPort: 4789
+          CidrIp: !Ref AccessLocation
+
+  CloudStackRouterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Allow ingress to the CloudStack UI, and to any services that may be offered by the VMs
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: 8
+          ToPort: -1
+          CidrIp: !Ref AccessLocation
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: !Ref AccessLocation
+        - IpProtocol: udp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: !Ref AccessLocation
+
+  # Allow management instances, host instances, and CloudStack system VMs to access the file system.
+  CloudStackEFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Enable access from CloudStack management and host instances to EFS
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref CloudStackManagementSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref CloudStackHostSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: !Ref CloudStackPublicTrafficCidr
+
+  # Allow the management instance to access the database.  This instance should always be in the same subnet as the
+  # database, so there's no need to grant access to the router security group.
+  CloudStackDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Allow the CloudStack management server to access the RDS database
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        SourceSecurityGroupId: !Ref CloudStackManagementSecurityGroup
+
+  CloudStackManagementSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Apply to CloudStack management instances to give them access to resources
+
+  CloudStackHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Apply to CloudStack host instances to give them access to resources
+
+  # This role only needed for the installation scripts to run.  If you're installing things manually, you won't need it.
+  CloudStackManagementServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+      Policies:
+        - PolicyName: "root"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref CloudStackDatabaseAdmin
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref CloudStackDatabaseServiceUser
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ec2/keypair/${CloudStackKeyPair.KeyPairId}
+
+  CloudStackManagementServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CloudStackManagementServerRole
+
+  # The script that configures CloudStack will need the private key.  By creating a key pair in the stack, instead of
+  # asking for a pre-existing key, we get access to the private key via the Systems Manager Parameter Store.  The user
+  # can get the private key there, too.
+  CloudStackKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub ${AWS::StackName}-KeyPair
+      KeyType: rsa
+
+  CloudStackTransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      Description: Handles VXLAN multicast traffic for the CloudStack overlay subnet
+      MulticastSupport: enable
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  CloudStackTransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      SubnetIds:
+        - !Ref CloudStackSubnet
+      TransitGatewayId: !Ref CloudStackTransitGateway
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  CloudStackTransitGatewayMulticastDomain:
+    Type: AWS::EC2::TransitGatewayMulticastDomain
+    Properties:
+      Options:
+        AutoAcceptSharedAssociations: disable
+        Igmpv2Support: enable
+        StaticSourcesSupport: disable
+      TransitGatewayId: !Ref CloudStackTransitGateway
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  CloudStackTransitGatewayMulticastDomainAssociation:
+    Type: AWS::EC2::TransitGatewayMulticastDomainAssociation
+    Properties:
+      SubnetId: !Ref CloudStackSubnet
+      TransitGatewayAttachmentId: !Ref CloudStackTransitGatewayAttachment
+      TransitGatewayMulticastDomainId: !Ref CloudStackTransitGatewayMulticastDomain
+
+  CloudStackFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      ProvisionedThroughputInMibps: !Ref EFSProvisionedThroughputInMibps
+      ThroughputMode: provisioned
+
+  CloudStackEFSMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref CloudStackFileSystem
+      SecurityGroups:
+        - !Ref CloudStackEFSSecurityGroup
+      SubnetId: !Ref CloudStackSubnet
+
+  CloudStackDatabaseAdmin:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Database credentials for the admin user
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: "`'\"@:/\\"
+
+  CloudStackDatabaseServiceUser:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Database credentials for the CloudStack management service
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "cloud"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: "`'\"@:/\\"
+
+  CloudStackDatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for the CloudStack RDS database
+      SubnetIds:
+       - !Ref CloudStackSubnet
+       - !Ref SecondSubnet
+
+  CloudStackDatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: CloudStack database parameters
+      Family: mysql8.0
+      Parameters:
+        innodb_lock_wait_timeout: 600
+        innodb_rollback_on_timeout: 1
+
+  # The database must be in the same subnet as the EC2 instances, or the stack creation will fail.  That's because
+  # the management instance needs to connect to the database during the stack creation, but the needed route table
+  # entries won't exist.
+  #
+  # Putting the database and EC2 instances in the same subnet also makes it possible to use security groups to limit
+  # DB access to just the management instance.  If the DB connections had to be routed to another subnet, it would be
+  # necessary to modify the DB security group to allow access from the router instance.  This could potentially allow
+  # DB access from CloudStack VMs.
+  #
+  # This template is providing the DB instance with a subnet group that contains exactly two subnets.  Those two
+  # subnets have to be in different availability zones, or the stack creation will fail.  The template specifies an
+  # availability zone for the database instance, which can only possibly match one of the subnets in the group.  This
+  # forces the database to be in the correct subnet.
+  #
+  # Instead of adding an availability zone parameter to the template, the availability zone is obtained from one of
+  # EC2 instances.  It doesn't have to be done this way, but it's convenient and reduces the opportunities for bad
+  # input.
+  CloudStackDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mysql
+      EngineVersion: 8.0
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-Database
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      MaxAllocatedStorage: !Ref DatabaseMaxStorage
+      AutoMinorVersionUpgrade: true
+      MasterUsername: !Sub '{{resolve:secretsmanager:${CloudStackDatabaseAdmin}::username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${CloudStackDatabaseAdmin}::password}}'
+      StorageEncrypted: true
+      MultiAZ: false
+      AvailabilityZone: !GetAtt CloudStackRouterInstance.AvailabilityZone
+      DBParameterGroupName: !Ref CloudStackDatabaseParameterGroup
+      DBSubnetGroupName: !Ref CloudStackDatabaseSubnetGroup
+      DeleteAutomatedBackups: true
+      VPCSecurityGroups: [ !Ref CloudStackDBSecurityGroup ]
+
+  ###############################################################################
+  # CloudStack Management Server Instance
+  ###############################################################################
+  CloudStackManagementInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CloudStackTransitGatewayMulticastDomainAssociation
+      - CloudStackRouterInstance
+      - CloudStackHostInstance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          cloudstack_install:
+            - get_scripts
+            - install
+            - signal_completion
+        get_scripts:
+          files:
+            /bootstrap/common.sh:
+              source: !FindInMap [FileSourceMap, Common, URL]
+              mode: 600
+              owner: root
+              group: root
+            /bootstrap/install_cloudstack_management_on_ec2.sh:
+              source: !FindInMap [FileSourceMap, InstallManagement, URL]
+              mode: 700
+              owner: root
+              group: root
+            /bootstrap/configure_cloudstack_demo.sh:
+              source: !FindInMap [FileSourceMap, ConfigureDemo, URL]
+              mode: 700
+              owner: root
+              group: root
+        install:
+          commands:
+            01_install_cloudstack:
+              command:
+                - '/bootstrap/install_cloudstack_management_on_ec2.sh'
+                - '--cloudstack-version'
+                - !Ref CloudStackVersion
+                - '--dns-ip'
+                - !Ref DnsAddress
+                - '--efs-endpoint'
+                - !Sub ${CloudStackFileSystem.FileSystemId}.efs.${AWS::Region}.amazonaws.com
+                - '--limit-log-files'
+                - '--multicast-ip'
+                - !Ref MulticastIP
+                - '--overlay-gateway-ip'
+                - !Ref OverlaySubnetRouterIpAddress
+                - '--overlay-host-ip'
+                - !Ref OverlaySubnetManagementIpAddress
+                - '--overlay-netmask'
+                - !Ref OverlaySubnetMask
+                - '--rds-endpoint'
+                - !GetAtt CloudStackDatabase.Endpoint.Address
+                - '--rds-port'
+                - !GetAtt CloudStackDatabase.Endpoint.Port
+                - '--rds-admin-secret'
+                - !Ref CloudStackDatabaseAdmin
+                - '--rds-service-secret'
+                - !Ref CloudStackDatabaseServiceUser
+              cwd: /bootstrap
+            02_configure_cloudstack:
+              command:
+                - '/bootstrap/configure_cloudstack_demo.sh'
+                - '--dns-ip'
+                - !Ref DnsAddress
+                - '--efs'
+                - '--gateway-ip'
+                - !Ref OverlaySubnetRouterIpAddress
+                - '--host-ip'
+                - !Ref OverlaySubnetHostIpAddress
+                - '--host-username'
+                - 'centos'
+                - '--key-pair'
+                - !GetAtt CloudStackKeyPair.KeyPairId
+                - '--netmask'
+                - !Ref OverlaySubnetMask
+                - '--pod-cidr'
+                - !Ref CloudStackPodCidr
+                - '--public-traffic-cidr'
+                - !Ref CloudStackPublicTrafficCidr
+                - '--shared-network-cidr'
+                - !Ref CloudStackSharedNetworkCidr
+                - '--primary-storage-url'
+                - !Sub nfs://${CloudStackFileSystem.FileSystemId}.efs.${AWS::Region}.amazonaws.com/zone1/primary
+                - '--secondary-storage-url'
+                - !Sub nfs://${CloudStackFileSystem.FileSystemId}.efs.${AWS::Region}.amazonaws.com/zone1/secondary
+                - '--template-name'
+                - !Ref SampleTemplateName
+                - '--template-url'
+                - !Ref SampleTemplateUrl
+              cwd: /bootstrap
+        signal_completion:
+          commands:
+            # Add a temporary route so cfn-signal can succeed.
+            01_add_route:
+              command: 'route add 169.254.169.254/32 dev eth0'
+            02_signal:
+              command:
+                - '/usr/local/bin/cfn-signal'
+                - '-e'
+                - '0'
+                - '--stack'
+                - !Ref AWS::StackName
+                - '--resource'
+                - 'CloudStackManagementInstance'
+                - '--region'
+                - !Ref AWS::Region
+            # Delete the temporary route so CloudStack can use link-local addresses for its own needs.
+            03_delete_route:
+              command: 'route delete 169.254.169.254/32 dev eth0'
+    Properties:
+      ImageId: !FindInMap [ImageIdMap, NonRouter, ImageId]
+      InstanceType: !Ref ManagementInstanceType
+      IamInstanceProfile: !Ref CloudStackManagementServerInstanceProfile
+      KeyName: !Ref CloudStackKeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CloudStackVXLANSecurityGroup
+            - !Ref CloudStackManagementSecurityGroup
+          SubnetId: !Ref CloudStackSubnet
+      UserData: !Base64 
+        Fn::Join:
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum -y install python3
+            - |
+              python3 -m easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            - |
+            - '/usr/local/bin/cfn-init -v '
+            - '    --stack '
+            -      !Ref AWS::StackName
+            - '    --resource CloudStackManagementInstance '
+            - '    --configsets cloudstack_install '
+            - '    --region '
+            -      !Ref AWS::Region
+            - |+
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 20
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Management
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+
+  ###############################################################################
+  # CloudStack VM Host Instance
+  ###############################################################################
+  CloudStackHostInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CloudStackTransitGatewayMulticastDomainAssociation
+      - CloudStackRouterInstance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          cloudstack_install:
+            - get_scripts
+            - install
+            - signal_completion
+        get_scripts:
+          files:
+            /bootstrap/common.sh:
+              source: !FindInMap [FileSourceMap, Common, URL]
+              mode: 600
+              owner: root
+              group: root
+            /bootstrap/install_cloudstack_agent_on_ec2.sh:
+              source: !FindInMap [FileSourceMap, InstallAgent, URL]
+              mode: 700
+              owner: root
+              group: root
+        install:
+          commands:
+            01_install_cloudstack:
+              command:
+                - '/bootstrap/install_cloudstack_agent_on_ec2.sh'
+                - '--cloudstack-version'
+                - !Ref CloudStackVersion
+                - '--dns-ip'
+                - !Ref DnsAddress
+                - '--limit-log-files'
+                - '--multicast-ip'
+                - !Ref MulticastIP
+                - '--overlay-gateway-ip'
+                - !Ref OverlaySubnetRouterIpAddress
+                - '--overlay-host-ip'
+                - !Ref OverlaySubnetHostIpAddress
+                - '--overlay-netmask'
+                - !Ref OverlaySubnetMask
+              cwd: /bootstrap
+        signal_completion:
+          commands:
+            # Add a temporary route so cfn-signal can succeed.
+            01_add_route:
+              command: 'route add 169.254.169.254/32 dev eth0'
+            02_signal:
+              command:
+                - '/usr/local/bin/cfn-signal'
+                - '-e'
+                - '0'
+                - '--stack'
+                - !Ref AWS::StackName
+                - '--resource'
+                - 'CloudStackHostInstance'
+                - '--region'
+                - !Ref AWS::Region
+            # Delete the temporary route so CloudStack can use link-local addresses for its own needs.
+            03_delete_route:
+              command: 'route delete 169.254.169.254/32 dev eth0'
+    Properties:
+      ImageId: !FindInMap [ImageIdMap, NonRouter, ImageId]
+      InstanceType: !Ref HostInstanceType
+      KeyName: !Ref CloudStackKeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref CloudStackVXLANSecurityGroup
+            - !Ref CloudStackHostSecurityGroup
+          SubnetId: !Ref CloudStackSubnet
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum -y install python3
+            - |
+              python3 -m easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            - |
+            - '/usr/local/bin/cfn-init -v '
+            - '    --stack '
+            - !Ref AWS::StackName
+            - '    --resource CloudStackHostInstance '
+            - '    --configsets cloudstack_install '
+            - '    --region '
+            - !Ref AWS::Region
+            - |+
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 20
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Host
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+
+  ###############################################################################
+  # CloudStack Router Instance
+  ###############################################################################
+  CloudStackRouterInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CloudStackTransitGatewayMulticastDomainAssociation
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          router_setup:
+            - get_scripts
+            - configure
+            - signal_completion
+        get_scripts:
+          files:
+            /bootstrap/common.sh:
+              source: !FindInMap [FileSourceMap, Common, URL]
+              mode: 600
+              owner: root
+              group: root
+            /bootstrap/setup_vxlan_router_on_ec2.sh:
+              source: !FindInMap [FileSourceMap, SetupRouter, URL]
+              mode: 700
+              owner: root
+              group: root
+        configure:
+          commands:
+            01_configure_router:
+              command:
+                - '/bootstrap/setup_vxlan_router_on_ec2.sh'
+                - '--multicast-ip'
+                - !Ref MulticastIP
+                - '--overlay-host-ip'
+                - !Ref OverlaySubnetRouterIpAddress
+                - '--overlay-netmask'
+                - !Ref OverlaySubnetMask
+                # NAT is needed for software to be installed on the EC2 instances before the user has a chance to
+                # update the route tables to provide Internet access to the overlay network.
+                - '--nat'
+                - '--nat-exception'
+                - !Ref AccessLocation
+              cwd: /bootstrap
+        signal_completion:
+          commands:
+            01_signal:
+              command:
+                - '/opt/aws/bin//cfn-signal'
+                - '-e'
+                - '0'
+                - '--stack'
+                - !Ref AWS::StackName
+                - '--resource'
+                - 'CloudStackRouterInstance'
+                - '--region'
+                - !Ref AWS::Region
+    Properties:
+      ImageId: !FindInMap [ImageIdMap, Router, ImageId]
+      InstanceType: !Ref RouterInstanceType
+      KeyName: !Ref CloudStackKeyPair
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref CloudStackVXLANSecurityGroup
+            - !Ref CloudStackRouterSecurityGroup
+          SubnetId: !Ref CloudStackSubnet
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+            - '/opt/aws/bin/cfn-init -v '
+            - '    --stack '
+            - !Ref AWS::StackName
+            - '    --resource CloudStackRouterInstance '
+            - '    --configsets router_setup '
+            - '    --region '
+            - !Ref AWS::Region
+            - |+
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 10
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Router
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+
+###############################################################################
+# Outputs
+###############################################################################
+Outputs:
+  RouterInstanceId:
+    Value: !Ref CloudStackRouterInstance
+    Description: The ID of the CloudStack router instance
+
+  HostInstanceId:
+    Value: !Ref CloudStackHostInstance
+    Description: The ID of the CloudStack host instance
+
+  ManagementInstanceId:
+    Value: !Ref CloudStackManagementInstance
+    Description: The ID of the CloudStack management instance
+
+  CloudStackURL:
+    Value: !Sub http://${OverlaySubnetRouterIpAddress}:8080/client/
+
+  KeyPairId:
+    Value: !GetAtt CloudStackKeyPair.KeyPairId
+    Description: The SSH key pair ID
+
+  KeyPairCommand:
+    Value: !Sub aws ssm get-parameter --name /ec2/keypair/${CloudStackKeyPair.KeyPairId} --region ${AWS::Region} --with-decryption
+      --query Parameter.Value --output text
+    Description: Run this command to retrieve the SSH key from the Parameter Store
