@@ -244,19 +244,18 @@ Resources:
             - signal_completion
         get_scripts:
           files:
-            # TODO: Add source URLs for the files below.
             /bootstrap/common.sh:
-              source: 
+              source: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/common.sh
               mode: 600
               owner: root
               group: root
             /bootstrap/install_cloudstack_on_ec2.sh:
-              source: 
+              source: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/install_cloudstack_on_ec2.sh
               mode: 700
               owner: root
               group: root
             /bootstrap/configure_cloudstack_demo.sh:
-              source: 
+              source: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/configure_cloudstack_demo.sh
               mode: 700
               owner: root
               group: root

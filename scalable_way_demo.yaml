@@ -312,18 +312,17 @@ Parameters:
 # Mappings
 ###############################################################################
 Mappings:
-  # TODO: Add file URLs below
   FileSourceMap:
     Common:
-      URL: 
+      URL: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/common.sh
     InstallManagement:
-      URL: 
+      URL: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/install_cloudstack_management_on_ec2.sh
     InstallAgent:
-      URL: 
+      URL: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/install_cloudstack_agent_on_ec2.sh
     SetupRouter:
-      URL: 
+      URL: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/setup_vxlan_router_on_ec2.sh
     ConfigureDemo:
-      URL: 
+      URL: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/configure_cloudstack_demo.sh
   ImageIdMap:
     Router:
       # Use ARM64 Amazon Linux 2 -- Using ARM64 to save a few cents. The router can be ARM64 or x86_64, AL2 or CentOS 7.
