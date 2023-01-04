@@ -33,6 +33,7 @@ Metadata:
         Parameters:
           - VpcId
           - CloudStackSubnet
+          - CloudStackSubnetCidr
           - SecondSubnet
           - DnsAddress
           - MulticastIP
@@ -86,6 +87,16 @@ Parameters:
       A private subnet in your Virtual Private Cloud (VPC) for the CloudStack EC2 instances.  Outbound Internet access
       is required.
     ConstraintDescription: Must be an existing subnet in the selected Virtual Private Cloud.
+
+  CloudStackSubnetCidr:
+    Description: The IP address range (in CIDR notation) of the CloudStack subnet
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/(1[6-9]|2[0-4])'
+    ConstraintDescription: >-
+      Must be a valid IP CIDR range in the form x.x.x.x/x.  For security reasons, this demo requires a suffix of /16 or
+      greater.
 
   SecondSubnet:
     Type: AWS::EC2::Subnet::Id
@@ -346,7 +357,8 @@ Resources:
         - IpProtocol: udp
           FromPort: 4789
           ToPort: 4789
-          CidrIp: !Ref AccessLocation
+          # The UDP rule can't use a security group as the source.  https://docs.aws.amazon.com/vpc/latest/tgw/how-multicast-works.html
+          CidrIp: !Ref CloudStackSubnetCidr
 
   CloudStackRouterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
