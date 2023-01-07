@@ -18,7 +18,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 # Building a Cloud in the Cloud: Running Apache CloudStack on Amazon EC2
 
 ## Intro
-This is a collection of AWS CloudFormation templates and bash scripts that demonstrate ways to run Apache CloudStack on Amazon Elastic Compute Cloud (Amazon EC2).  The reasons for the scripts are explained in their corresponding blog posts.  Read more about the simple way and the scalable way.  [TODO: add blog post links.]
+This is a collection of AWS CloudFormation templates and bash scripts that demonstrate ways to run Apache CloudStack on Amazon Elastic Compute Cloud (Amazon EC2).  The reasons for the scripts are explained in their corresponding blog posts.  Read more about [the simple way](https://aws.amazon.com/blogs/compute/building-a-cloud-in-the-cloud-running-apache-cloudstack-on-amazon-ec2-part-1/) and [the scalable way](https://aws.amazon.com/blogs/compute/building-a-cloud-in-the-cloud-running-apache-cloudstack-on-amazon-ec2-part-2/).
 
 ## Prereqs
 CentOS 7 -- The [Official CentOS 7 x86_64 HVM image](https://aws.amazon.com/marketplace/pp/B08KYKK42V) works well.  If you use a different image, you might run into issues with firewalls or NetworkManager.  If you're using a different version or flavor of Linux, you'll likely need to customize these scripts.
