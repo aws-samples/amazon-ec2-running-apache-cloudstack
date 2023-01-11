@@ -245,17 +245,17 @@ Resources:
         get_scripts:
           files:
             /bootstrap/common.sh:
-              source: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/common.sh
+              source: https://raw.githubusercontent.com/aws-samples/amazon-ec2-running-apache-cloudstack/main/common.sh
               mode: 600
               owner: root
               group: root
             /bootstrap/install_cloudstack_on_ec2.sh:
-              source: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/install_cloudstack_on_ec2.sh
+              source: https://raw.githubusercontent.com/aws-samples/amazon-ec2-running-apache-cloudstack/main/install_cloudstack_on_ec2.sh
               mode: 700
               owner: root
               group: root
             /bootstrap/configure_cloudstack_demo.sh:
-              source: https://github.com/aws-samples/amazon-ec2-running-apache-cloudstack/blob/main/configure_cloudstack_demo.sh
+              source: https://raw.githubusercontent.com/aws-samples/amazon-ec2-running-apache-cloudstack/main/configure_cloudstack_demo.sh
               mode: 700
               owner: root
               group: root
